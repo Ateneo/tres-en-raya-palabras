@@ -6,8 +6,9 @@ import AuthScreen from './components/AuthScreen';
 import Game from './components/Game';
 import Admin from './components/Admin';
 import History from './components/History';
+import PrologGame from './components/PrologGame';
 
-type View = 'menu' | 'game' | 'admin' | 'history';
+type View = 'menu' | 'game' | 'admin' | 'history' | 'prolog';
 
 function AppContent() {
   const { user, profile, loading, refreshProfile } = useAuth();
@@ -51,6 +52,9 @@ function AppContent() {
   }
   if (view === 'history') {
     return <History onBack={() => setView('menu')} />;
+  }
+  if (view === 'prolog') {
+    return <PrologGame onBack={() => { setView('menu'); refreshProfile(); }} />;
   }
 
   return (
@@ -149,7 +153,28 @@ function AppContent() {
             }}></div>
             <div className="relative flex items-center justify-center gap-3 text-white">
               <i className="fas fa-gamepad text-xl"></i>
-              <span className="tracking-wide">JUGAR</span>
+              <span className="tracking-wide">JUGAR 2 JUGADORES</span>
+            </div>
+          </button>
+
+          <button
+            onClick={() => setView('prolog')}
+            className="w-full group relative overflow-hidden px-8 py-5 rounded-2xl font-black text-lg transition-all transform hover:scale-[1.02] active:scale-[0.98]"
+            style={{
+              background: 'linear-gradient(135deg, #06b6d4 0%, #7c3aed 50%, #a855f7 100%)',
+              boxShadow: '0 15px 40px rgba(6, 182, 212, 0.4), inset 0 2px 0 rgba(255,255,255,0.3), inset 0 -4px 0 rgba(0,0,0,0.2)',
+              border: '1px solid rgba(255,255,255,0.2)'
+            }}
+          >
+            <div className="absolute top-0 left-0 right-0 h-1/2" style={{
+              background: 'linear-gradient(180deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0) 100%)'
+            }}></div>
+            <div className="relative flex items-center justify-center gap-3 text-white">
+              <span className="text-2xl">🧠</span>
+              <div className="text-left">
+                <span className="tracking-wide block">VS IA PROLOG</span>
+                <span className="text-xs font-normal opacity-80 block">SWI-Prolog WebAssembly</span>
+              </div>
             </div>
           </button>
 
