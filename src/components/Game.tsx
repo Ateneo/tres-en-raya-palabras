@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { isValidWord, getDictionary } from '../utils/dictionary';
+import { saveGameRecord, updatePlayerStats } from '../firebase/firestore';
+import { useAuth } from '../contexts/AuthContext';
 
 interface GameProps {
   onBack: () => void;
@@ -26,6 +28,7 @@ const LINES = [
 ];
 
 export default function Game({ onBack }: GameProps) {
+  const { user, profile } = useAuth();
   const [board, setBoard] = useState<Board>(Array(9).fill(null));
   const [currentPlayer, setCurrentPlayer] = useState(1);
   const [selectedLetter, setSelectedLetter] = useState<string>('');
@@ -35,16 +38,25 @@ export default function Game({ onBack }: GameProps) {
   const [messageType, setMessageType] = useState<'success' | 'warning' | 'info' | 'end'>('info');
   const [gameOver, setGameOver] = useState(false);
   const [dictSize, setDictSize] = useState(0);
+  const [player1Name, setPlayer1Name] = useState('Jugador 1');
+  const [player2Name, setPlayer2Name] = useState('Jugador 2');
+  const [startTime] = useState(Date.now());
+  const [wordsFormedByPlayer, setWordsFormedByPlayer] = useState<{ 1: string[]; 2: string[] }>({ 1: [], 2: [] });
 
   useEffect(() => {
-    setDictSize(getDictionary().length);
-  }, []);
+    getDictionary().then(dict => setDictSize(dict.length));
+    
+    // Nombres de jugadores
+    if (user) {
+      setPlayer1Name(profile?.displayName || 'Jugador 1');
+      setPlayer2Name('Jugador 2');
+    }
+  }, [user, profile]);
 
   const checkNewLines = useCallback((newBoard: Board, player: number, existingScored: LineScore[]): LineScore[] => {
     const newScores: LineScore[] = [];
     
     for (const line of LINES) {
-      // Skip already scored lines
       const alreadyScored = existingScored.some(
         sl => sl.line[0] === line[0] && sl.line[1] === line[1] && sl.line[2] === line[2]
       );
@@ -53,42 +65,58 @@ export default function Game({ onBack }: GameProps) {
       const cells = line.map(i => newBoard[i]);
       if (cells.every(c => c !== null)) {
         const word = cells.join('');
-        if (isValidWord(word)) {
-          newScores.push({ line, word, player });
-        }
+        newScores.push({ line, word, player });
       }
     }
     
     return newScores;
   }, []);
 
-  const handleCellClick = (index: number) => {
+  const handleCellClick = async (index: number) => {
     if (board[index] !== null || !selectedLetter || gameOver) return;
 
     const newBoard = [...board];
     newBoard[index] = selectedLetter;
     
-    // Check for new completed valid lines
+    // Check for new completed lines
     const newLineScores = checkNewLines(newBoard, currentPlayer, scoredLines);
     
+    // Validate words
+    const validLineScores: LineScore[] = [];
+    for (const ls of newLineScores) {
+      const valid = await isValidWord(ls.word);
+      if (valid) {
+        validLineScores.push(ls);
+      }
+    }
+    
     // Calculate new scores
-    const pointsEarned = newLineScores.length * 3;
+    const pointsEarned = validLineScores.length * 3;
     const newScores = { ...scores };
     if (pointsEarned > 0) {
       newScores[currentPlayer as 1 | 2] += pointsEarned;
+    }
+
+    // Update words formed
+    const newWordsFormed = { ...wordsFormedByPlayer };
+    if (validLineScores.length > 0) {
+      newWordsFormed[currentPlayer as 1 | 2] = [
+        ...newWordsFormed[currentPlayer as 1 | 2],
+        ...validLineScores.map(ls => ls.word)
+      ];
+      setWordsFormedByPlayer(newWordsFormed);
     }
 
     // Update all state
     setBoard(newBoard);
     setScores(newScores);
 
-    if (newLineScores.length > 0) {
-      setScoredLines(prev => [...prev, ...newLineScores]);
-      const words = newLineScores.map(ls => ls.word.toUpperCase()).join(', ');
-      setMessage(`¡Jugador ${currentPlayer} formó "${words}"! +${pointsEarned} pts`);
+    if (validLineScores.length > 0) {
+      setScoredLines(prev => [...prev, ...validLineScores]);
+      const words = validLineScores.map(ls => ls.word.toUpperCase()).join(', ');
+      setMessage(`¡${currentPlayer === 1 ? player1Name : player2Name} formó "${words}"! +${pointsEarned} pts`);
       setMessageType('success');
     } else {
-      // Check if any line was completed but invalid
       let invalidCompleted = false;
       for (const line of LINES) {
         const alreadyScored = scoredLines.some(
@@ -104,7 +132,7 @@ export default function Game({ onBack }: GameProps) {
         setMessage('Línea completada, pero no es una palabra válida del diccionario');
         setMessageType('warning');
       } else {
-        setMessage(`Jugador ${currentPlayer} colocó "${selectedLetter.toUpperCase()}"`);
+        setMessage(`${currentPlayer === 1 ? player1Name : player2Name} colocó "${selectedLetter.toUpperCase()}"`);
         setMessageType('info');
       }
     }
@@ -113,14 +141,56 @@ export default function Game({ onBack }: GameProps) {
     const isFull = newBoard.every(c => c !== null);
     if (isFull) {
       setGameOver(true);
+      
+      let winnerMsg = '';
+      let winnerUid: string | null = null;
+      
       if (newScores[1] > newScores[2]) {
-        setMessage(`¡Jugador 1 gana la partida! (${newScores[1]} - ${newScores[2]})`);
+        winnerMsg = `¡${player1Name} gana la partida! (${newScores[1]} - ${newScores[2]})`;
+        winnerUid = user?.uid || null;
       } else if (newScores[2] > newScores[1]) {
-        setMessage(`¡Jugador 2 gana la partida! (${newScores[2]} - ${newScores[1]})`);
+        winnerMsg = `¡${player2Name} gana la partida! (${newScores[2]} - ${newScores[1]})`;
       } else {
-        setMessage(`¡Empate! (${newScores[1]} - ${newScores[2]})`);
+        winnerMsg = `¡Empate! (${newScores[1]} - ${newScores[2]})`;
       }
+      setMessage(winnerMsg);
       setMessageType('end');
+
+      // Save game record to Firestore
+      if (user) {
+        try {
+          const duration = Math.floor((Date.now() - startTime) / 1000);
+          await saveGameRecord({
+            player1: {
+              uid: user.uid,
+              displayName: player1Name,
+              score: newScores[1],
+              wordsFormed: newWordsFormed[1]
+            },
+            player2: {
+              uid: 'guest',
+              displayName: player2Name,
+              score: newScores[2],
+              wordsFormed: newWordsFormed[2]
+            },
+            winner: winnerUid,
+            board: newBoard,
+            scoredLines: [...scoredLines, ...validLineScores],
+            playedAt: new Date().toISOString(),
+            duration
+          });
+
+          // Update player stats
+          await updatePlayerStats(
+            user.uid,
+            newScores[1] > newScores[2],
+            newScores[1],
+            newWordsFormed[1].length
+          );
+        } catch (error) {
+          console.error('Error saving game:', error);
+        }
+      }
     }
 
     // Switch player
@@ -141,6 +211,7 @@ export default function Game({ onBack }: GameProps) {
     setMessage('');
     setMessageType('info');
     setGameOver(false);
+    setWordsFormedByPlayer({ 1: [], 2: [] });
   };
 
   const isCellInScoredLine = (index: number): LineScore | undefined => {
@@ -187,7 +258,7 @@ export default function Game({ onBack }: GameProps) {
           }`}>
             <div className="flex items-center justify-between">
               <div>
-                <div className="text-blue-300 font-bold text-sm md:text-base">Jugador 1</div>
+                <div className="text-blue-300 font-bold text-sm md:text-base truncate max-w-[120px]">{player1Name}</div>
                 <div className="text-white/50 text-xs">🔵 Azul</div>
               </div>
               <div className="text-2xl md:text-3xl font-bold text-white">{scores[1]}</div>
@@ -200,7 +271,7 @@ export default function Game({ onBack }: GameProps) {
           }`}>
             <div className="flex items-center justify-between">
               <div>
-                <div className="text-red-300 font-bold text-sm md:text-base">Jugador 2</div>
+                <div className="text-red-300 font-bold text-sm md:text-base truncate max-w-[120px]">{player2Name}</div>
                 <div className="text-white/50 text-xs">🔴 Rojo</div>
               </div>
               <div className="text-2xl md:text-3xl font-bold text-white">{scores[2]}</div>
@@ -271,9 +342,9 @@ export default function Game({ onBack }: GameProps) {
           <div className="bg-white/5 backdrop-blur-sm rounded-2xl border border-white/10 p-3 md:p-4 mb-4">
             <div className="text-center mb-3">
               <span className="text-white/80 text-sm">
-                Turno del{' '}
+                Turno de{' '}
                 <strong className={currentPlayer === 1 ? 'text-blue-300' : 'text-red-300'}>
-                  Jugador {currentPlayer}
+                  {currentPlayer === 1 ? player1Name : player2Name}
                 </strong>
                 {' '}— Elige una letra:
               </span>
@@ -317,7 +388,7 @@ export default function Game({ onBack }: GameProps) {
                       : 'bg-red-500/30 text-red-200 border border-red-400/50'
                   }`}
                 >
-                  {sl.word} <span className="opacity-60">(J{sl.player})</span>
+                  {sl.word} <span className="opacity-60">({sl.player === 1 ? player1Name : player2Name})</span>
                 </span>
               ))}
             </div>
@@ -332,10 +403,10 @@ export default function Game({ onBack }: GameProps) {
           <ul className="text-white/60 text-xs mt-2 space-y-1.5">
             <li>• Los jugadores se turnan para colocar letras en el tablero</li>
             <li>• Primero selecciona una letra, luego haz clic en una casilla vacía</li>
-            <li>• Cuando se completa una línea de 3 letras (fila, columna o diagonal), se verifica si es una palabra válida</li>
+            <li>• Cuando se completa una línea de 3 letras, se verifica si es una palabra válida</li>
             <li>• Si la palabra existe en el diccionario, el jugador que colocó la última letra gana <strong className="text-green-300">3 puntos</strong></li>
             <li>• Gana quien tenga más puntos al llenar el tablero</li>
-            <li>• Puedes añadir palabras al diccionario desde el panel de administración</li>
+            <li>• Las partidas se guardan automáticamente en tu perfil</li>
           </ul>
         </details>
       </div>
